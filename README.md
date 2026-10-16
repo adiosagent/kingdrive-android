@@ -24,17 +24,28 @@ Or from a terminal with JDK 17 + Android SDK installed: `./gradlew assembleDebug
 2. Tap **STEP 1: ENABLE ACCESSIBILITY** → Agree → switch on *Drive Voice Assist* in the Accessibility list.
 3. Back in the app tap **STEP 2: START DRIVING MODE**. It announces "Driving mode active" and listens continuously.
 
-## Voice commands
+## Voice commands (v1.1)
+
+Say it naturally — filler words ("hey King, please…") are ignored and names are fuzzy-matched against your contacts.
 
 | Say | Does |
 |---|---|
-| open wechat / open whatsapp / open gmail | launches the app |
-| close / go home · go back | Home / Back |
-| scroll down / scroll up | swipe gesture |
-| click *Alice* / tap *Send* | taps the first clickable element with that text |
-| send message *on my way* / type *…* | types into the open chat box, then taps "Send" |
-| write email saying *…* | opens the mail composer with that body |
-| call *Alice* | dials the first matching contact |
+| **WhatsApp Allan saying on my way** · *WhatsApp Allan on my way* · *tell Allan I'll be late* | finds the contact, opens the chat with the text, taps Send |
+| **WhatsApp Allan** | asks "What's the message for Allan?" then sends |
+| **WeChat Allan saying …** · *message Allan on WeChat …* | opens WeChat, searches the contact, types, sends |
+| **Text Allan …** | SMS |
+| **Call Allan** | dials (asks "one or two?" if several contacts match) |
+| **Email Allan about the meeting tomorrow** | drafts an email on that topic (AI if a key is set, template otherwise) and opens Gmail |
+| **Email Allan saying I will send the file tonight** | email with that exact body |
+| **Reply on my way** | types into the open chat and sends |
+| **Open WeChat / YouTube / Maps / any app** | launches it |
+| **Navigate to KLCC** | Google Maps turn-by-turn |
+| **Read screen** | reads the visible text aloud |
+| scroll down / up · go back · home · click *[text]* · send | screen control |
+| **yes** / **no** / **cancel** | confirm or abort a pending send |
+| **stop driving mode** | turns listening off |
+
+Settings in the app: speech language (EN / 中文 / Malay), confirm-before-send, auto-send email, WhatsApp country code, your name for email sign-off, optional Claude API key + model for AI-written emails.
 
 ## Play Store notes
 
