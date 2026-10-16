@@ -73,7 +73,29 @@ class ContactResolver(private val context: Context) {
      * the leftover words ("on my way") as the remainder.
      */
     fun resolveWithRemainder(query: String): Resolution {
-        val words = norm(query).split(" ").filter { it.isNotEmpty() }
+        val q = norm(query)
+        if (q.isEmpty()) return Resolution(emptyList(), "", false)
+        // Chinese (no spaces): try character prefixes, longest first
+        if (!q.contains(' ') && q.any { it in '\u4e00'..'\u9fff' }) {
+            var best: Resolution? = null
+            var bestScore = 0
+            val maxN = minOf(8, q.length)
+            for (n in maxN downTo 1) {
+                val prefix = q.substring(0, n)
+                val r = resolve(prefix)
+                if (r.isEmpty()) continue
+                val top = r[0].second
+                if (n <= 1 && top < 100) continue
+                val adjusted = top + n * 4
+                if (adjusted > bestScore) {
+                    bestScore = adjusted
+                    val ambiguous = r.size > 1 && r[1].second >= top - 10 && r[1].first.name != r[0].first.name
+                    best = Resolution(r.map { it.first }.take(3), q.substring(n).trim(), ambiguous)
+                }
+            }
+            return best ?: Resolution(emptyList(), "", false)
+        }
+        val words = q.split(" ").filter { it.isNotEmpty() }
         if (words.isEmpty()) return Resolution(emptyList(), "", false)
         val maxN = minOf(3, words.size)
         var best: Resolution? = null

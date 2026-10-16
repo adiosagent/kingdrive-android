@@ -102,12 +102,32 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         instance = null
     }
 
+    private var langVariant = 0
+
+    /** Google's recogniser prefers BCP-47 tags like cmn-Hans-CN; other engines want zh-CN. */
+    private fun recognizerLangTag(pref: String): String {
+        val variants = when (pref) {
+            "zh-CN" -> listOf("cmn-Hans-CN", "zh-CN", "zh")
+            "zh-TW" -> listOf("cmn-Hant-TW", "zh-TW", "zh")
+            "ms-MY" -> listOf("ms-MY", "ms")
+            "en-SG" -> listOf("en-SG", "en-US")
+            else -> listOf(pref)
+        }
+        return variants[langVariant % variants.size]
+    }
+
+    private fun zh(): Boolean = Prefs.language(this).startsWith("zh")
+    fun t(en: String, zhText: String): String = if (zh()) zhText else en
+
     fun applyPrefs() {
         val lang = Prefs.language(this)
+        val tag = recognizerLangTag(lang)
         if (::recognizerIntent.isInitialized) {
-            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
-            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
+            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, tag)
+            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, tag)
+            recognizerIntent.putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
         }
+        log("Language: $lang (tag $tag)")
         val locale = when {
             lang.startsWith("zh-TW") -> Locale.TRADITIONAL_CHINESE
             lang.startsWith("zh") -> Locale.SIMPLIFIED_CHINESE
@@ -256,8 +276,8 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
             recognizer = createRecognizer()
             recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Prefs.language(this@DriveAccessibilityService))
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Prefs.language(this@DriveAccessibilityService))
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, recognizerLangTag(Prefs.language(this@DriveAccessibilityService)))
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, recognizerLangTag(Prefs.language(this@DriveAccessibilityService)))
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
@@ -291,6 +311,14 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
                         }
                     }
                     log("⚠ ${errorName(error)} (engine: $engineName)")
+                    if (error == 12 || error == 13) {
+                        langVariant++
+                        applyPrefs()
+                        if (langVariant % 3 == 0) { switchEngine(); if (!isDriveModeActive) return }
+                        setState(State.STARTING)
+                        scheduleListen(600)
+                        return
+                    }
                     if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || error == SpeechRecognizer.ERROR_CLIENT) {
                         try { recognizer?.cancel() } catch (e: Exception) { }
                     }
@@ -353,7 +381,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
 
     private fun handlePending(p: Pending, raw: String): Boolean {
         val cmd = CommandParser.parse(raw)
-        if (cmd is Command.No) { pending = null; speak("Cancelled."); return true }
+        if (cmd is Command.No) { pending = null; speak(t("Cancelled.", "已取消。")); return true }
         return when (p) {
             is Pending.Confirm -> {
                 if (cmd is Command.Yes || cmd is Command.Send) { pending = null; p.action(); true }
@@ -370,32 +398,32 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
                 val chosen = if (idx != null && idx in p.candidates.indices) p.candidates[idx]
                 else p.candidates.firstOrNull { q.isNotBlank() && ContactResolver.norm(it.name).contains(q) }
                 if (chosen != null) { pending = null; p.onChosen(chosen); true }
-                else { speak("Say one, two or three, or say cancel."); true }
+                else { speak(t("Say one, two or three, or say cancel.", "请说一、二或三，或者说取消。")); true }
             }
         }
     }
 
     private fun execute(cmd: Command) {
         when (cmd) {
-            is Command.Yes -> speak("Nothing to confirm.")
-            is Command.No -> speak("Okay.")
-            is Command.Stop -> { speak("Driving mode stopped.", false); setDriveMode(false) }
-            is Command.Help -> speak("Try: WhatsApp Allan saying I'm on my way. Call Allan. Email Allan about the meeting. Open WeChat. Navigate to KLCC. Scroll down. Go back. Read screen. Reply, then your message. Or say send.")
+            is Command.Yes -> speak(t("Nothing to confirm.", "没有需要确认的。"))
+            is Command.No -> speak(t("Okay.", "好的。"))
+            is Command.Stop -> { speak(t("Driving mode stopped.", "驾驶模式已停止。"), false); setDriveMode(false) }
+            is Command.Help -> speak(t("Try: WhatsApp Allan saying I'm on my way. Call Allan. Email Allan about the meeting. Open WeChat. Navigate to KLCC. Scroll down. Go back. Read screen. Reply, then your message. Or say send.", "你可以说：微信给小明说我在路上。打电话给小明。写邮件给小明关于会议。打开微信。导航到双子塔。向下滑。返回。朗读屏幕。回复，然后说内容。或者说发送。"))
             is Command.Back -> { performGlobalAction(GLOBAL_ACTION_BACK); scheduleListen(400) }
-            is Command.Home -> { performGlobalAction(GLOBAL_ACTION_HOME); speak("Home.") }
+            is Command.Home -> { performGlobalAction(GLOBAL_ACTION_HOME); speak(t("Closed.", "已关闭。")) }
             is Command.ScrollDown -> { scroll(true); scheduleListen(600) }
             is Command.ScrollUp -> { scroll(false); scheduleListen(600) }
             is Command.ReadScreen -> readScreen()
-            is Command.Send -> if (clickSendButton()) speak("Sent.") else speak("I can't find a send button on this screen.")
+            is Command.Send -> if (clickSendButton()) speak(t("Sent.", "已发送。")) else speak(t("I can't find a send button on this screen.", "在这个屏幕上找不到发送按钮。"))
             is Command.OpenApp -> openApp(cmd.appName)
             is Command.Navigate -> navigate(cmd.destination)
             is Command.Call -> callContact(cmd.contactQuery)
             is Command.SendMessage -> startSendMessage(cmd.app, cmd.contactQuery, cmd.message)
             is Command.Reply -> replyInCurrentChat(cmd.message)
-            is Command.Type -> if (typeIntoFocused(cmd.text)) speak("Typed. Say send to send it.") else speak("No text box found.")
+            is Command.Type -> if (typeIntoFocused(cmd.text)) speak(t("Typed. Say send to send it.", "已输入。说发送来发出去。")) else speak(t("No text box found.", "找不到输入框。"))
             is Command.Click -> clickText(cmd.target)
             is Command.Email -> startEmail(cmd)
-            is Command.Unknown -> { action("Not understood"); speak("Sorry, I didn't get that. Say help for commands.") }
+            is Command.Unknown -> { action("Not understood"); speak(t("Sorry, I didn't get that. Say help for commands.", "抱歉，我没听懂。说帮助查看指令。")) }
         }
     }
 
@@ -460,15 +488,15 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
 
     private fun openApp(name: String) {
         val app = resolveApp(name)
-        if (app == null || !launch(app.first)) { speak("I couldn't find an app called $name."); return }
-        action("Open ${app.second}"); speak("Opening ${app.second}.")
+        if (app == null || !launch(app.first)) { speak(t("I couldn't find an app called $name.", "找不到叫 $name 的应用。")); return }
+        action("Open ${app.second}"); speak(t("Opening ${app.second}.", "正在打开 ${app.second}。"))
     }
 
     private fun navigate(dest: String) {
         try {
             val i = Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=" + Uri.encode(dest)))
                 .setPackage(PKG_MAPS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            if (isInstalled(PKG_MAPS)) { startActivity(i); speak("Navigating to $dest."); return }
+            if (isInstalled(PKG_MAPS)) { startActivity(i); speak(t("Navigating to $dest.", "正在导航到 $dest。")); return }
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(dest))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             speak("Searching for $dest.")
         } catch (e: Exception) {
@@ -482,7 +510,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         val res = contacts.resolveWithRemainder(query)
         val cands = res.candidates.filter { it.phones.isNotEmpty() }
         when {
-            cands.isEmpty() -> speak("I couldn't find $query in your contacts.")
+            cands.isEmpty() -> speak(t("I couldn't find $query in your contacts.", "在联系人里找不到 $query。"))
             res.ambiguous && cands.size > 1 -> askChoose(cands) { dial(it) }
             else -> dial(cands.first())
         }
@@ -490,7 +518,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
 
     private fun dial(c: ContactResolver.Contact) {
         try {
-            action("Call ${c.name}"); speak("Calling ${c.name}.")
+            action("Call ${c.name}"); speak(t("Calling ${c.name}.", "正在拨打 ${c.name}。"))
             startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(c.phones.first()))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         } catch (e: Exception) {
             speak("I'm not allowed to make calls. Please grant the phone permission.")
@@ -501,7 +529,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         val top = cands.take(3)
         pending = Pending.Choose(top, onChosen)
         val names = top.mapIndexed { i, c -> "${i + 1}, ${c.name}" }.joinToString(". ")
-        speak("I found ${top.size} contacts. $names. Which one?")
+        speak(t("I found ${top.size} contacts. $names. Which one?", "找到 ${top.size} 个联系人。$names。请说第几个？"))
     }
 
     // ───────────────────────── messaging ─────────────────────────
@@ -509,9 +537,9 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     private fun appLabel(app: String) = when (app) { "wechat" -> "WeChat"; "sms" -> "SMS"; else -> "WhatsApp" }
 
     private fun startSendMessage(app: String, query: String, message: String?) {
-        if (query.isBlank()) { speak("Who should I message?"); return }
+        if (query.isBlank()) { speak(t("Who should I message?", "要发给谁？")); return }
         val res = contacts.resolveWithRemainder(query)
-        if (res.candidates.isEmpty()) { speak("I couldn't find a contact named $query."); return }
+        if (res.candidates.isEmpty()) { speak(t("I couldn't find a contact named $query.", "找不到叫 $query 的联系人。")); return }
         val msg = message ?: res.remainder.takeIf { it.isNotBlank() }?.let { CommandParser.cleanMessage(it) }
         val resolvedApp = if (app == "default") {
             if (isInstalled(PKG_WHATSAPP) || isInstalled(PKG_WHATSAPP_BIZ)) "whatsapp" else "sms"
@@ -523,12 +551,12 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     private fun continueMessage(app: String, c: ContactResolver.Contact, msg: String?) {
         if (msg == null) {
             pending = Pending.AwaitText { t -> continueMessage(app, c, t) }
-            speak("What's the message for ${c.firstName()}?")
+            speak(t("What's the message for ${c.firstName()}?", "要给 ${c.firstName()} 发什么内容？"))
             return
         }
         if (Prefs.confirm(this)) {
             pending = Pending.Confirm { doSend(app, c, msg) }
-            speak("${appLabel(app)} to ${c.name}: $msg. Say yes to send.")
+            speak(t("${appLabel(app)} to ${c.name}: $msg. Say yes to send.", "用${appLabel(app)}发给 ${c.name}：$msg。说好来发送。"))
         } else doSend(app, c, msg)
     }
 
@@ -542,7 +570,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
 
     private fun sendWhatsApp(c: ContactResolver.Contact, msg: String) {
         val pkg = listOf(PKG_WHATSAPP, PKG_WHATSAPP_BIZ).firstOrNull { isInstalled(it) }
-        if (pkg == null) { speak("WhatsApp is not installed."); return }
+        if (pkg == null) { speak(t("WhatsApp is not installed.", "没有安装 WhatsApp。")); return }
         val phone = c.phones.firstOrNull()
         if (phone == null) { speak("${c.name} has no phone number."); return }
         val intl = ContactResolver.toInternational(phone, Prefs.countryCode(this))
@@ -551,11 +579,11 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
             startActivity(Intent(Intent.ACTION_VIEW, uri).setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         } catch (e: Exception) { speak("Could not open WhatsApp."); return }
         log("WhatsApp → ${c.name} ($intl)")
-        speak("Opening WhatsApp.", false)
+        speak(t("Opening WhatsApp.", "正在打开 WhatsApp。"), false)
         retry(12, 700,
             { nodeByViewId("$pkg:id/send")?.let { clickNode(it) } ?: false },
-            { action("WhatsApp sent to ${c.name}"); speak("Sent to ${c.name}.") },
-            { speak("The message is ready in WhatsApp. Say send when you see it.") })
+            { action("WhatsApp sent to ${c.name}"); speak(t("Sent to ${c.name}.", "已发送给 ${c.name}。")) },
+            { speak(t("The message is ready in WhatsApp. Say send when you see it.", "信息已经在 WhatsApp 里准备好了。看到后说发送。")) })
     }
 
     private fun sendSms(c: ContactResolver.Contact, msg: String) {
@@ -571,10 +599,10 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     }
 
     private fun sendWeChat(c: ContactResolver.Contact, msg: String) {
-        if (!isInstalled(PKG_WECHAT)) { speak("WeChat is not installed."); return }
+        if (!isInstalled(PKG_WECHAT)) { speak(t("WeChat is not installed.", "没有安装微信。")); return }
         val name = c.name
         launch(PKG_WECHAT)
-        speak("Opening WeChat.", false)
+        speak(t("Opening WeChat.", "正在打开微信。"), false)
         handler.postDelayed({
             val search = nodeByDesc("Search", "搜索") ?: nodeByText("Search", "搜索")
             if (search == null || !clickNode(search)) { speak("I can't find WeChat search. Open the chat yourself and say reply."); return@postDelayed }
@@ -585,14 +613,14 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
                     val hit = findNode(root()) { n ->
                         n.isVisibleToUser && !n.isEditable && (n.text?.toString()?.contains(name, true) == true)
                     }
-                    if (hit == null || !clickNode(hit)) { speak("I couldn't find $name in WeChat."); return@postDelayed }
+                    if (hit == null || !clickNode(hit)) { speak(t("I couldn't find $name in WeChat.", "在微信里找不到 $name。")); return@postDelayed }
                     handler.postDelayed({
                         val input = firstEditable()
                         if (input == null || !setTextOn(input, msg)) { speak("Couldn't type the message in WeChat."); return@postDelayed }
                         retry(6, 500,
                             { (nodeByText("Send", "发送") ?: nodeByDesc("Send", "发送"))?.let { clickNode(it) } ?: false },
-                            { speak("Sent to $name on WeChat.") },
-                            { speak("Message typed in WeChat. Say send.") })
+                            { action("WeChat sent to $name"); speak(t("Sent to $name on WeChat.", "已在微信发送给 $name。")) },
+                            { speak(t("Message typed in WeChat. Say send.", "信息已输入微信。说发送。")) })
                     }, 1500)
                 }, 1800)
             }, 900)
@@ -606,7 +634,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         }
         if (Prefs.confirm(this)) {
             pending = Pending.Confirm { go() }
-            speak("Reply: $msg. Say yes to send.")
+            speak(t("Reply: $msg. Say yes to send.", "回复：$msg。说好来发送。"))
         } else go()
     }
 
@@ -625,7 +653,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     private fun composeEmail(c: ContactResolver.Contact?, topic: String?, body: String?) {
         if (topic == null && body == null) {
             pending = Pending.AwaitText { t -> composeEmail(c, null, t) }
-            speak(if (c == null) "What should the email say?" else "What should the email to ${c.firstName()} say?")
+            speak(if (c == null) t("What should the email say?", "邮件要写什么？") else t("What should the email to ${c.firstName()} say?", "给 ${c.firstName()} 的邮件要写什么？"))
             return
         }
         val name = c?.name ?: ""
@@ -634,7 +662,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         val sender = Prefs.userName(this)
         val key = Prefs.apiKey(this)
         if (key.isNotBlank()) {
-            speak("Drafting the email.", false)
+            speak(t("Drafting the email.", "正在撰写邮件。"), false)
             AiDrafter.draftEmail(key, Prefs.model(this), name, topic, body, sender) { result ->
                 handler.post {
                     if (result != null) openComposer(to, result.first, result.second, warn)
@@ -659,7 +687,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
             speak("${note}Sending the email.", false)
             retry(10, 700, { clickSendButton() }, { speak("Email sent. Subject: $subject.") }, { speak("Email is ready. Say send to send it.") })
         } else {
-            speak("${note}Email ready. Subject: $subject. Check it and say send.")
+            speak(t("${note}Email ready. Subject: $subject. Check it and say send.", "${note}邮件已准备好。主题：$subject。检查后说发送。"))
         }
     }
 
