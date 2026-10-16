@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Drive Voice Assist</string>
+    <string name="accessibility_service_description">Drive Voice Assist uses Accessibility Service to help drivers safely perform hands-free voice actions (scrolling, clicking buttons, and typing spoken messages) without touching the screen while driving. No personal data is collected or shared.</string>
+</resources>
