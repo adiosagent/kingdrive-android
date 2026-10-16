@@ -199,6 +199,7 @@ class MainActivity : AppCompatActivity() {
             "Click [button text] · Send" to "",
             "Yes · No · Cancel · Stop driving mode" to "",
             "Close the app · Close WhatsApp · Exit" to "goes to the home screen",
+            "Switch to Chinese · 切换英文" to "changes the speech language by voice",
             "微信给小明说我在路上 · 打电话给小明" to "中文：设置里选中文后可用",
             "写邮件给小明关于明天的会议 · 打开微信 · 导航到双子塔" to "",
             "向下滑 · 返回 · 关闭 · 朗读屏幕 · 发送 · 好 / 取消" to ""
@@ -258,7 +259,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(settings, lp(0, dp(12)))
 
         root.addView(TextView(this).apply {
-            text = "Drive Voice Assist v1.3 · Keep your eyes on the road."
+            text = "Drive Voice Assist v1.4 · Keep your eyes on the road."
             textSize = 11f
             setTextColor(textMuted)
             gravity = Gravity.CENTER

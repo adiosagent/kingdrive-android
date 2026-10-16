@@ -12,6 +12,7 @@ sealed class Command {
     data class Type(val text: String) : Command()
     data class Reply(val message: String) : Command()
     data class Unknown(val raw: String) : Command()
+    data class SetLanguage(val lang: String) : Command()
     object Send : Command()
     object ScrollDown : Command()
     object ScrollUp : Command()
@@ -80,6 +81,8 @@ object CommandParser {
         if (s in yesWords) return Command.Yes
         if (s in noWords) return Command.No
 
+        if (Regex("^(?:switch|change) (?:to |language to )?(?:chinese|mandarin|中文)$").matches(s) || s == "chinese mode" || s == "中文") return Command.SetLanguage("zh-CN")
+        if (Regex("^(?:switch|change) (?:to |language to )?english$").matches(s) || s == "english mode") return Command.SetLanguage("en-US")
         if (Regex("^(stop|end|exit|quit|turn off|disable) (driving mode|drive mode|listening|voice assist|voice mode|the assistant)$").matches(s)) return Command.Stop
         if (Regex("^(help|what can you do|what can i say|commands|list commands|show commands)$").matches(s)) return Command.Help
         if (Regex("^(go )?(back|previous|return)$").matches(s)) return Command.Back
@@ -280,6 +283,8 @@ object CommandParser {
         if (s.isBlank()) return null
         if (s in zhYes) return Command.Yes
         if (s in zhNo) return Command.No
+        if (Regex("^(切换|换|改|用|转)(成|到|为)?(英文|英语|english)(模式)?$").matches(s) || s == "english" || s == "英文模式") return Command.SetLanguage("en-US")
+        if (Regex("^(切换|换|改|用|转)(成|到|为)?(中文|华语|普通话)(模式)?$").matches(s) || s == "中文模式" || s == "中文") return Command.SetLanguage("zh-CN")
         if (Regex("^(停止|关闭|退出|结束|关掉)(驾驶模式|驾驶|监听|语音助手|语音模式|语音)$").matches(s)) return Command.Stop
         if (Regex("^(帮助|你能做什么|有什么命令|有什么指令|指令|命令)$").matches(s)) return Command.Help
         if (Regex("^(返回|后退|上一页|退回|回去)$").matches(s)) return Command.Back

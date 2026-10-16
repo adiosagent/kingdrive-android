@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.Build
 import android.os.Looper
 import android.speech.RecognitionListener
+import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
@@ -54,8 +55,11 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     private var listenAfterSpeech = true
     private var errorStreak = 0
     private var hardErrors = 0
-    private var engineMode = 0          // 0 = system default, 1 = on-device, 2 = Google app
+    private var engineMode = 0
     private var engineSwitches = 0
+    private var engines: List<Pair<String, ComponentName?>> = listOf("system" to null)
+    private var listenToken = 0
+    private var readyReceived = false
     private lateinit var contacts: ContactResolver
 
     private sealed class Pending {
@@ -72,6 +76,8 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         instance = this
         contacts = ContactResolver(this)
         tts = TextToSpeech(this, this)
+        discoverEngines()
+        engineMode = preferredEngineIndex()
         setupRecognizer()
         log("Service connected")
     }
@@ -107,8 +113,8 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     /** Google's recogniser prefers BCP-47 tags like cmn-Hans-CN; other engines want zh-CN. */
     private fun recognizerLangTag(pref: String): String {
         val variants = when (pref) {
-            "zh-CN" -> listOf("cmn-Hans-CN", "zh-CN", "zh")
-            "zh-TW" -> listOf("cmn-Hant-TW", "zh-TW", "zh")
+            "zh-CN" -> listOf("zh-CN", "cmn-Hans-CN", "zh")
+            "zh-TW" -> listOf("zh-TW", "cmn-Hant-TW", "zh")
             "ms-MY" -> listOf("ms-MY", "ms")
             "en-SG" -> listOf("en-SG", "en-US")
             else -> listOf(pref)
@@ -142,12 +148,16 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         isDriveModeActive = on
         pending = null
         if (on) {
-            applyPrefs()
             errorStreak = 0
             hardErrors = 0
             engineSwitches = 0
+            langVariant = 0
+            discoverEngines()
+            engineMode = preferredEngineIndex()
+            setupRecognizer()
+            applyPrefs()
             Thread { contacts.all() }.start()
-            log("Driving mode ON (engine: $engineName)")
+            log("Driving mode ON (engine: ${engines[engineMode].first})")
             setState(State.STARTING)
             if (!SpeechRecognizer.isRecognitionAvailable(this)) {
                 speak("Speech recognition is not available on this phone. Please install or enable the Google app.", false)
@@ -225,49 +235,78 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         else -> "ERROR_$code"
     }
 
-    /** Builds a recogniser for the current engineMode, falling back to the system default. */
+    /** Lists every speech-recognition service installed, so we can try them in turn. */
+    private fun discoverEngines() {
+        val list = ArrayList<Pair<String, ComponentName?>>()
+        list.add("system" to null)
+        try {
+            for (ri in packageManager.queryIntentServices(Intent(RecognitionService.SERVICE_INTERFACE), 0)) {
+                val si = ri.serviceInfo ?: continue
+                val label = si.packageName.substringAfterLast('.')
+                if (list.none { it.second?.packageName == si.packageName }) list.add(label to ComponentName(si.packageName, si.name))
+            }
+        } catch (e: Exception) { }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try { if (SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) list.add("on-device" to ComponentName("ondevice", "ondevice")) } catch (e: Exception) { }
+        }
+        engines = list
+        log("Speech engines: " + list.joinToString(", ") { it.first })
+    }
+
+    /** Google's engine handles Chinese and names far better than the Samsung default. */
+    private fun preferredEngineIndex(): Int {
+        val g = engines.indexOfFirst { it.second?.packageName?.contains("google") == true }
+        return if (g >= 0) g else 0
+    }
+
     private fun createRecognizer(): SpeechRecognizer? {
+        if (engines.isEmpty()) engines = listOf("system" to null)
+        val (name, comp) = engines[engineMode % engines.size]
+        engineName = name
         return try {
-            when (engineMode) {
-                1 -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
-                    engineName = "on-device"
-                    SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
-                } else {
-                    engineName = "system"
-                    SpeechRecognizer.createSpeechRecognizer(this)
-                }
-                2 -> {
-                    val google = ComponentName(
-                        "com.google.android.googlequicksearchbox",
-                        "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
-                    )
-                    engineName = "google"
-                    SpeechRecognizer.createSpeechRecognizer(this, google)
-                }
-                else -> {
-                    engineName = "system"
-                    SpeechRecognizer.createSpeechRecognizer(this)
-                }
+            when {
+                comp == null -> SpeechRecognizer.createSpeechRecognizer(this)
+                comp.packageName == "ondevice" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+                else -> SpeechRecognizer.createSpeechRecognizer(this, comp)
             }
         } catch (e: Exception) {
-            log("⚠ cannot create recogniser (${e.message})")
+            log("⚠ cannot create engine $name (${e.message})")
             engineName = "system"
             try { SpeechRecognizer.createSpeechRecognizer(this) } catch (e2: Exception) { null }
         }
     }
 
     private fun switchEngine() {
-        engineMode = (engineMode + 1) % 3
+        engineMode = (engineMode + 1) % engines.size
         engineSwitches++
         hardErrors = 0
-        log("↻ switching speech engine → mode $engineMode")
+        log("↻ switching speech engine → ${engines[engineMode].first}")
         setupRecognizer()
-        if (engineSwitches == 1) speak("Switching speech engine.")
-        if (engineSwitches >= 4) {
+        applyPrefs()
+        if (engineSwitches == 1) speak(t("Switching speech engine.", "正在切换语音引擎。"))
+        if (engineSwitches > engines.size * 2) {
             isDriveModeActive = false
             setState(State.ERROR)
-            speak("Speech recognition keeps failing on this phone. Please check that the Google app is installed and updated, and that the microphone permission is allowed.", false)
+            speak(t("Speech recognition keeps failing on this phone. Please check that the Google app is installed and updated, and that the microphone permission is allowed.",
+                "语音识别一直失败。请确认已安装并更新 Google 应用，并允许麦克风权限。"), false)
         }
+    }
+
+    /** The engine accepted startListening but never answered — treat as a failure and move on. */
+    private fun onHang(token: Int, phase: String) {
+        if (token != listenToken || !isDriveModeActive || isSpeaking) return
+        if (phase == "ready" && readyReceived) return
+        isListening = false
+        try { recognizer?.cancel() } catch (e: Exception) { }
+        log("⚠ engine not responding ($phase, tag ${recognizerLangTag(Prefs.language(this))}, engine $engineName)")
+        hardErrors++
+        val pref = Prefs.language(this)
+        if (pref.startsWith("zh") || pref.startsWith("ms") || pref == "en-SG") {
+            langVariant++
+            applyPrefs()
+            if (langVariant % 3 == 0) switchEngine()
+        } else if (hardErrors >= 2) switchEngine()
+        if (isDriveModeActive) { setState(State.STARTING); scheduleListen(500) }
     }
 
     private fun setupRecognizer() {
@@ -283,7 +322,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
             }
             recognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) { isListening = true; setState(State.LISTENING) }
+                override fun onReadyForSpeech(params: Bundle?) { isListening = true; readyReceived = true; setState(State.LISTENING) }
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
@@ -293,6 +332,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
 
                 override fun onError(error: Int) {
                     isListening = false
+                    listenToken++
                     if (!isDriveModeActive || isSpeaking) return
                     when (error) {
                         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
@@ -331,6 +371,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
 
                 override fun onResults(results: Bundle?) {
                     isListening = false
+                    listenToken++
                     errorStreak = 0
                     hardErrors = 0
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -351,8 +392,12 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
             val r = recognizer ?: return@post
             try {
                 isListening = true
+                readyReceived = false
                 setState(State.STARTING)
                 r.startListening(recognizerIntent)
+                val token = ++listenToken
+                handler.postDelayed({ if (isListening && !readyReceived) onHang(token, "ready") }, 7000)
+                handler.postDelayed({ if (isListening) onHang(token, "result") }, 30000)
             } catch (e: Exception) {
                 isListening = false
                 log("⚠ startListening failed: ${e.message}")
@@ -423,8 +468,18 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
             is Command.Type -> if (typeIntoFocused(cmd.text)) speak(t("Typed. Say send to send it.", "已输入。说发送来发出去。")) else speak(t("No text box found.", "找不到输入框。"))
             is Command.Click -> clickText(cmd.target)
             is Command.Email -> startEmail(cmd)
+            is Command.SetLanguage -> setLanguage(cmd.lang)
             is Command.Unknown -> { action("Not understood"); speak(t("Sorry, I didn't get that. Say help for commands.", "抱歉，我没听懂。说帮助查看指令。")) }
         }
+    }
+
+    private fun setLanguage(lang: String) {
+        Prefs.get(this).edit().putString("lang", lang).apply()
+        langVariant = 0
+        hardErrors = 0
+        applyPrefs()
+        action("Language → $lang")
+        speak(if (lang.startsWith("zh")) "已切换到中文。" else "Switched to English.")
     }
 
     // ───────────────────────── apps & navigation ─────────────────────────
