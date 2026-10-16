@@ -2,265 +2,81 @@ package com.safe.drivevoiceassist
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
-import android.annotation.SuppressLint
+import android.content.ComponentName
 import android.content.Intent
 import android.graphics.Path
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.ContactsContract
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.text.format.DateFormat
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.Locale
 
 class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitListener {
 
-    private var speechRecognizer: SpeechRecognizer? = null
-    private lateinit var recognizerIntent: Intent
-    private var tts: TextToSpeech? = null
-    private val handler = Handler(Looper.getMainLooper())
-    private var isListening = false
-
     companion object {
         var instance: DriveAccessibilityService? = null
-        var isDriveModeActive = false
+        @Volatile var isDriveModeActive = false
+        val logLines = ArrayList<String>()
+        var logListener: ((String) -> Unit)? = null
+        private const val TTS_ID = "kd_tts"
+
+        const val PKG_WHATSAPP = "com.whatsapp"
+        const val PKG_WHATSAPP_BIZ = "com.whatsapp.w4b"
+        const val PKG_WECHAT = "com.tencent.mm"
+        const val PKG_GMAIL = "com.google.android.gm"
+        const val PKG_MAPS = "com.google.android.apps.maps"
     }
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var recognizer: SpeechRecognizer? = null
+    private lateinit var recognizerIntent: Intent
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var isListening = false
+    private var isSpeaking = false
+    private var listenAfterSpeech = true
+    private var errorStreak = 0
+    private lateinit var contacts: ContactResolver
+
+    private sealed class Pending {
+        class Confirm(val action: () -> Unit) : Pending()
+        class Choose(val candidates: List<ContactResolver.Contact>, val onChosen: (ContactResolver.Contact) -> Unit) : Pending()
+        class AwaitText(val onText: (String) -> Unit) : Pending()
+    }
+    private var pending: Pending? = null
+
+    // ───────────────────────── lifecycle ─────────────────────────
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        contacts = ContactResolver(this)
         tts = TextToSpeech(this, this)
-        setupSpeechRecognizer()
-        speak("Drive Voice Assist connected.")
+        setupRecognizer()
+        log("Service connected")
     }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            tts?.language = Locale.US
-        }
-    }
-
-    fun speak(text: String) {
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "DriveAssistTTS")
-    }
-
-    private fun setupSpeechRecognizer() {
-        handler.post {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-            recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            }
-
-            speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) { isListening = true }
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() { isListening = false }
-
-                override fun onError(error: Int) {
-                    isListening = false
-                    if (isDriveModeActive) {
-                        handler.postDelayed({ startListening() }, 900)
-                    }
-                }
-
-                override fun onResults(results: Bundle?) {
-                    isListening = false
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) {
-                        val command = matches[0].lowercase(Locale.getDefault())
-                        processVoiceCommand(command)
-                    }
-                    if (isDriveModeActive) {
-                        handler.postDelayed({ startListening() }, 1000)
-                    }
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
+            ttsReady = true
+            applyPrefs()
+            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) { isSpeaking = true }
+                override fun onDone(utteranceId: String?) { finishedSpeaking() }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) { finishedSpeaking() }
+                override fun onError(utteranceId: String?, errorCode: Int) { finishedSpeaking() }
             })
-        }
-    }
-
-    fun startListening() {
-        if (!isDriveModeActive) return
-        handler.post {
-            if (!isListening) {
-                try {
-                    speechRecognizer?.startListening(recognizerIntent)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
-    }
-
-    fun stopListening() {
-        handler.post {
-            speechRecognizer?.stopListening()
-            isListening = false
-        }
-    }
-
-    private fun processVoiceCommand(command: String) {
-        when {
-            command.contains("open wechat") -> openApp("com.tencent.mm", "WeChat")
-            command.contains("open whatsapp") -> openApp("com.whatsapp", "WhatsApp")
-            command.contains("open gmail") || command.contains("open email") -> openApp("com.google.android.gm", "Gmail")
-
-            command.contains("close") || command.contains("go home") -> {
-                speak("Closing app")
-                performGlobalAction(GLOBAL_ACTION_HOME)
-            }
-            command.contains("go back") -> {
-                speak("Going back")
-                performGlobalAction(GLOBAL_ACTION_BACK)
-            }
-
-            command.contains("scroll down") -> scrollScreen(true)
-            command.contains("scroll up") -> scrollScreen(false)
-
-            command.startsWith("click ") || command.startsWith("tap ") -> {
-                val target = command.removePrefix("click ").removePrefix("tap ").trim()
-                clickTextOnScreen(target)
-            }
-
-            command.startsWith("type ") || command.startsWith("send message ") -> {
-                val msg = command.removePrefix("type ").removePrefix("send message ").trim()
-                typeAndSendMessage(msg)
-            }
-
-            command.contains("write email") || command.contains("send email") -> {
-                val body = command.substringAfter("saying", "I am currently driving and will reply shortly.")
-                composeEmail(body.trim())
-            }
-
-            command.startsWith("call ") || command.startsWith("help me call ") -> {
-                val contactName = command.removePrefix("help me ").removePrefix("call ").trim()
-                callContactByName(contactName)
-            }
-        }
-    }
-
-    private fun openApp(packageName: String, appName: String) {
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-        if (launchIntent != null) {
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(launchIntent)
-            speak("Opening $appName")
-        } else {
-            speak("$appName is not installed.")
-        }
-    }
-
-    private fun scrollScreen(scrollDown: Boolean) {
-        val dm = resources.displayMetrics
-        val midX = (dm.widthPixels / 2).toFloat()
-        val startY = if (scrollDown) (dm.heightPixels * 0.75).toFloat() else (dm.heightPixels * 0.25).toFloat()
-        val endY = if (scrollDown) (dm.heightPixels * 0.25).toFloat() else (dm.heightPixels * 0.75).toFloat()
-
-        val path = Path().apply {
-            moveTo(midX, startY)
-            lineTo(midX, endY)
-        }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 400))
-            .build()
-        dispatchGesture(gesture, null, null)
-    }
-
-    private fun clickTextOnScreen(targetText: String) {
-        val rootNode = rootInActiveWindow ?: return
-        val nodes = rootNode.findAccessibilityNodeInfosByText(targetText)
-        if (nodes.isNullOrEmpty()) {
-            speak("Cannot find $targetText")
-            return
-        }
-        for (node in nodes) {
-            if (performClickOnNode(node)) {
-                speak("Clicked $targetText")
-                return
-            }
-        }
-    }
-
-    private fun performClickOnNode(node: AccessibilityNodeInfo?): Boolean {
-        var current = node
-        while (current != null) {
-            if (current.isClickable) {
-                current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                return true
-            }
-            current = current.parent
-        }
-        return false
-    }
-
-    private fun typeAndSendMessage(message: String) {
-        val rootNode = rootInActiveWindow ?: return
-        val editText = findEditTextNode(rootNode)
-        if (editText != null) {
-            val arguments = Bundle()
-            arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
-            editText.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-            editText.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-            speak("Sending $message")
-            handler.postDelayed({ clickTextOnScreen("Send") }, 1000)
-        } else {
-            speak("No chat box open")
-        }
-    }
-
-    private fun findEditTextNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-        if (node == null) return null
-        if (node.className?.contains("EditText") == true || node.isEditable) return node
-        for (i in 0 until node.childCount) {
-            val found = findEditTextNode(node.getChild(i))
-            if (found != null) return found
-        }
-        return null
-    }
-
-    private fun composeEmail(bodyText: String) {
-        speak("Opening email")
-        val intent = Intent(Intent.ACTION_SENDTO).apply {
-            data = Uri.parse("mailto:")
-            putExtra(Intent.EXTRA_SUBJECT, "Voice Email (Driving)")
-            putExtra(Intent.EXTRA_TEXT, bodyText)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        startActivity(intent)
-    }
-
-    @SuppressLint("Range")
-    private fun callContactByName(name: String) {
-        val cursor = contentResolver.query(
-            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-            null,
-            "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
-            arrayOf("%$name%"),
-            null
-        )
-        if (cursor != null && cursor.moveToFirst()) {
-            val number = cursor.getString(cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER))
-            val foundName = cursor.getString(cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME))
-            cursor.close()
-            speak("Calling $foundName")
-            val callIntent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number")).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(callIntent)
-        } else {
-            cursor?.close()
-            speak("Contact $name not found")
+            speak("Drive Voice Assist connected.", false)
         }
     }
 
@@ -269,8 +85,613 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
 
     override fun onDestroy() {
         super.onDestroy()
-        speechRecognizer?.destroy()
+        isDriveModeActive = false
+        recognizer?.destroy()
         tts?.shutdown()
         instance = null
+    }
+
+    fun applyPrefs() {
+        val lang = Prefs.language(this)
+        if (::recognizerIntent.isInitialized) {
+            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
+        }
+        val locale = when {
+            lang.startsWith("zh-TW") -> Locale.TRADITIONAL_CHINESE
+            lang.startsWith("zh") -> Locale.SIMPLIFIED_CHINESE
+            lang.startsWith("ms") -> Locale("ms", "MY")
+            lang.startsWith("en-GB") -> Locale.UK
+            else -> Locale.US
+        }
+        tts?.language = locale
+    }
+
+    fun setDriveMode(on: Boolean) {
+        isDriveModeActive = on
+        pending = null
+        if (on) {
+            applyPrefs()
+            errorStreak = 0
+            Thread { contacts.all() }.start()
+            log("Driving mode ON")
+            startListening()
+        } else {
+            log("Driving mode OFF")
+            handler.post { recognizer?.cancel(); isListening = false }
+            try { stopService(Intent(this, ListeningService::class.java)) } catch (e: Exception) { }
+        }
+    }
+
+    // ───────────────────────── logging / speech ─────────────────────────
+
+    fun log(msg: String) {
+        handler.post {
+            val line = "${DateFormat.format("HH:mm:ss", System.currentTimeMillis())}  $msg"
+            logLines.add(line)
+            if (logLines.size > 80) logLines.removeAt(0)
+            logListener?.invoke(line)
+        }
+    }
+
+    fun speak(text: String, listenAfter: Boolean = true) {
+        log("▶ $text")
+        val t = tts
+        if (t == null || !ttsReady) { if (listenAfter) scheduleListen(500); return }
+        handler.post {
+            recognizer?.cancel()
+            isListening = false
+            isSpeaking = true
+            listenAfterSpeech = listenAfter
+            t.speak(text, TextToSpeech.QUEUE_FLUSH, null, TTS_ID)
+        }
+    }
+
+    private fun finishedSpeaking() {
+        handler.post {
+            isSpeaking = false
+            if (listenAfterSpeech) scheduleListen(300)
+        }
+    }
+
+    // ───────────────────────── speech recognition ─────────────────────────
+
+    private fun setupRecognizer() {
+        handler.post {
+            recognizer?.destroy()
+            recognizer = try {
+                val google = ComponentName(
+                    "com.google.android.googlequicksearchbox",
+                    "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
+                )
+                if (packageManager.getLaunchIntentForPackage(google.packageName) != null)
+                    SpeechRecognizer.createSpeechRecognizer(this, google)
+                else SpeechRecognizer.createSpeechRecognizer(this)
+            } catch (e: Exception) {
+                SpeechRecognizer.createSpeechRecognizer(this)
+            }
+            recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Prefs.language(this@DriveAccessibilityService))
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+            }
+            recognizer?.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) { isListening = true }
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {}
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+
+                override fun onError(error: Int) {
+                    isListening = false
+                    if (!isDriveModeActive || isSpeaking) return
+                    when (error) {
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+                            isDriveModeActive = false
+                            speak("Microphone permission is missing. Please allow it in the app.", false)
+                            return
+                        }
+                        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                            errorStreak = 0
+                            scheduleListen(250)
+                            return
+                        }
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> recognizer?.cancel()
+                    }
+                    errorStreak++
+                    if (errorStreak > 12) { errorStreak = 0; setupRecognizer() }
+                    scheduleListen(minOf(500L + errorStreak * 500L, 4000L))
+                }
+
+                override fun onResults(results: Bundle?) {
+                    isListening = false
+                    errorStreak = 0
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val text = matches?.firstOrNull { it.isNotBlank() }
+                    if (text == null) { scheduleListen(250); return }
+                    handleUtterance(text.trim())
+                    if (!isSpeaking) scheduleListen(400)
+                }
+            })
+        }
+    }
+
+    fun startListening() {
+        if (!isDriveModeActive) return
+        handler.post {
+            if (isListening || isSpeaking) return@post
+            val r = recognizer ?: return@post
+            try {
+                isListening = true
+                r.startListening(recognizerIntent)
+            } catch (e: Exception) {
+                isListening = false
+                scheduleListen(1500)
+            }
+        }
+    }
+
+    fun stopListening() {
+        handler.post { recognizer?.cancel(); isListening = false }
+    }
+
+    private fun scheduleListen(delayMs: Long) {
+        handler.postDelayed({ startListening() }, delayMs)
+    }
+
+    // ───────────────────────── command handling ─────────────────────────
+
+    private fun handleUtterance(raw: String) {
+        log("🎤 $raw")
+        val p = pending
+        if (p != null && handlePending(p, raw)) return
+        execute(CommandParser.parse(raw))
+    }
+
+    private fun handlePending(p: Pending, raw: String): Boolean {
+        val cmd = CommandParser.parse(raw)
+        if (cmd is Command.No) { pending = null; speak("Cancelled."); return true }
+        return when (p) {
+            is Pending.Confirm -> {
+                if (cmd is Command.Yes || cmd is Command.Send) { pending = null; p.action(); true }
+                else { pending = null; false }
+            }
+            is Pending.AwaitText -> {
+                pending = null
+                p.onText(CommandParser.cleanMessage(raw))
+                true
+            }
+            is Pending.Choose -> {
+                val idx = CommandParser.ordinal(raw)
+                val q = ContactResolver.norm(raw)
+                val chosen = if (idx != null && idx in p.candidates.indices) p.candidates[idx]
+                else p.candidates.firstOrNull { q.isNotBlank() && ContactResolver.norm(it.name).contains(q) }
+                if (chosen != null) { pending = null; p.onChosen(chosen); true }
+                else { speak("Say one, two or three, or say cancel."); true }
+            }
+        }
+    }
+
+    private fun execute(cmd: Command) {
+        when (cmd) {
+            is Command.Yes -> speak("Nothing to confirm.")
+            is Command.No -> speak("Okay.")
+            is Command.Stop -> { speak("Driving mode stopped.", false); setDriveMode(false) }
+            is Command.Help -> speak("Try: WhatsApp Allan saying I'm on my way. Call Allan. Email Allan about the meeting. Open WeChat. Navigate to KLCC. Scroll down. Go back. Read screen. Reply, then your message. Or say send.")
+            is Command.Back -> { performGlobalAction(GLOBAL_ACTION_BACK); scheduleListen(400) }
+            is Command.Home -> { performGlobalAction(GLOBAL_ACTION_HOME); speak("Home.") }
+            is Command.ScrollDown -> { scroll(true); scheduleListen(600) }
+            is Command.ScrollUp -> { scroll(false); scheduleListen(600) }
+            is Command.ReadScreen -> readScreen()
+            is Command.Send -> if (clickSendButton()) speak("Sent.") else speak("I can't find a send button on this screen.")
+            is Command.OpenApp -> openApp(cmd.appName)
+            is Command.Navigate -> navigate(cmd.destination)
+            is Command.Call -> callContact(cmd.contactQuery)
+            is Command.SendMessage -> startSendMessage(cmd.app, cmd.contactQuery, cmd.message)
+            is Command.Reply -> replyInCurrentChat(cmd.message)
+            is Command.Type -> if (typeIntoFocused(cmd.text)) speak("Typed. Say send to send it.") else speak("No text box found.")
+            is Command.Click -> clickText(cmd.target)
+            is Command.Email -> startEmail(cmd)
+            is Command.Unknown -> speak("Sorry, I didn't get that. Say help for commands.")
+        }
+    }
+
+    // ───────────────────────── apps & navigation ─────────────────────────
+
+    private val appAliases = mapOf(
+        "whatsapp" to listOf(PKG_WHATSAPP, PKG_WHATSAPP_BIZ),
+        "whatsapp business" to listOf(PKG_WHATSAPP_BIZ),
+        "wechat" to listOf(PKG_WECHAT),
+        "gmail" to listOf(PKG_GMAIL), "email" to listOf(PKG_GMAIL), "mail" to listOf(PKG_GMAIL),
+        "maps" to listOf(PKG_MAPS), "google maps" to listOf(PKG_MAPS), "map" to listOf(PKG_MAPS),
+        "waze" to listOf("com.waze"),
+        "youtube" to listOf("com.google.android.youtube"),
+        "spotify" to listOf("com.spotify.music"),
+        "telegram" to listOf("org.telegram.messenger"),
+        "messages" to listOf("com.google.android.apps.messaging", "com.samsung.android.messaging"),
+        "phone" to listOf("com.samsung.android.dialer", "com.google.android.dialer"),
+        "dialer" to listOf("com.samsung.android.dialer", "com.google.android.dialer"),
+        "camera" to listOf("com.sec.android.app.camera", "com.google.android.GoogleCamera"),
+        "chrome" to listOf("com.android.chrome"), "browser" to listOf("com.android.chrome"),
+        "facebook" to listOf("com.facebook.katana"),
+        "instagram" to listOf("com.instagram.android"),
+        "tiktok" to listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill"),
+        "grab" to listOf("com.grabtaxi.passenger"),
+        "settings" to listOf("com.android.settings"),
+        "calendar" to listOf("com.google.android.calendar", "com.samsung.android.calendar"),
+        "mt5" to listOf("net.metaquotes.metatrader5"), "metatrader" to listOf("net.metaquotes.metatrader5"),
+        "mt4" to listOf("net.metaquotes.metatrader4")
+    )
+
+    private fun isInstalled(pkg: String) = packageManager.getLaunchIntentForPackage(pkg) != null
+
+    private fun launch(pkg: String): Boolean {
+        val i = packageManager.getLaunchIntentForPackage(pkg) ?: return false
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(i)
+        return true
+    }
+
+    private fun resolveApp(name: String): Pair<String, String>? {
+        val q = name.lowercase(Locale.ROOT).trim()
+        appAliases[q]?.firstOrNull { isInstalled(it) }?.let { return it to name }
+        val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        var best: Pair<String, String>? = null
+        var bestScore = 0
+        try {
+            for (ri in packageManager.queryIntentActivities(main, 0)) {
+                val label = ri.loadLabel(packageManager).toString()
+                val l = label.lowercase(Locale.ROOT)
+                val score = when {
+                    l == q -> 100
+                    l.startsWith(q) -> 80
+                    l.contains(q) -> 60
+                    ContactResolver.similarity(l, q) >= 0.8 -> 50
+                    else -> 0
+                }
+                if (score > bestScore) { bestScore = score; best = ri.activityInfo.packageName to label }
+            }
+        } catch (e: Exception) { }
+        return best
+    }
+
+    private fun openApp(name: String) {
+        val app = resolveApp(name)
+        if (app == null || !launch(app.first)) { speak("I couldn't find an app called $name."); return }
+        speak("Opening ${app.second}.")
+    }
+
+    private fun navigate(dest: String) {
+        try {
+            val i = Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=" + Uri.encode(dest)))
+                .setPackage(PKG_MAPS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (isInstalled(PKG_MAPS)) { startActivity(i); speak("Navigating to $dest."); return }
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(dest))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            speak("Searching for $dest.")
+        } catch (e: Exception) {
+            speak("No maps app found.")
+        }
+    }
+
+    // ───────────────────────── calls ─────────────────────────
+
+    private fun callContact(query: String) {
+        val res = contacts.resolveWithRemainder(query)
+        val cands = res.candidates.filter { it.phones.isNotEmpty() }
+        when {
+            cands.isEmpty() -> speak("I couldn't find $query in your contacts.")
+            res.ambiguous && cands.size > 1 -> askChoose(cands) { dial(it) }
+            else -> dial(cands.first())
+        }
+    }
+
+    private fun dial(c: ContactResolver.Contact) {
+        try {
+            speak("Calling ${c.name}.")
+            startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(c.phones.first()))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+            speak("I'm not allowed to make calls. Please grant the phone permission.")
+        }
+    }
+
+    private fun askChoose(cands: List<ContactResolver.Contact>, onChosen: (ContactResolver.Contact) -> Unit) {
+        val top = cands.take(3)
+        pending = Pending.Choose(top, onChosen)
+        val names = top.mapIndexed { i, c -> "${i + 1}, ${c.name}" }.joinToString(". ")
+        speak("I found ${top.size} contacts. $names. Which one?")
+    }
+
+    // ───────────────────────── messaging ─────────────────────────
+
+    private fun appLabel(app: String) = when (app) { "wechat" -> "WeChat"; "sms" -> "SMS"; else -> "WhatsApp" }
+
+    private fun startSendMessage(app: String, query: String, message: String?) {
+        if (query.isBlank()) { speak("Who should I message?"); return }
+        val res = contacts.resolveWithRemainder(query)
+        if (res.candidates.isEmpty()) { speak("I couldn't find a contact named $query."); return }
+        val msg = message ?: res.remainder.takeIf { it.isNotBlank() }?.let { CommandParser.cleanMessage(it) }
+        val resolvedApp = if (app == "default") {
+            if (isInstalled(PKG_WHATSAPP) || isInstalled(PKG_WHATSAPP_BIZ)) "whatsapp" else "sms"
+        } else app
+        if (res.ambiguous) askChoose(res.candidates) { c -> continueMessage(resolvedApp, c, msg) }
+        else continueMessage(resolvedApp, res.candidates.first(), msg)
+    }
+
+    private fun continueMessage(app: String, c: ContactResolver.Contact, msg: String?) {
+        if (msg == null) {
+            pending = Pending.AwaitText { t -> continueMessage(app, c, t) }
+            speak("What's the message for ${c.firstName()}?")
+            return
+        }
+        if (Prefs.confirm(this)) {
+            pending = Pending.Confirm { doSend(app, c, msg) }
+            speak("${appLabel(app)} to ${c.name}: $msg. Say yes to send.")
+        } else doSend(app, c, msg)
+    }
+
+    private fun doSend(app: String, c: ContactResolver.Contact, msg: String) {
+        when (app) {
+            "wechat" -> sendWeChat(c, msg)
+            "sms" -> sendSms(c, msg)
+            else -> sendWhatsApp(c, msg)
+        }
+    }
+
+    private fun sendWhatsApp(c: ContactResolver.Contact, msg: String) {
+        val pkg = listOf(PKG_WHATSAPP, PKG_WHATSAPP_BIZ).firstOrNull { isInstalled(it) }
+        if (pkg == null) { speak("WhatsApp is not installed."); return }
+        val phone = c.phones.firstOrNull()
+        if (phone == null) { speak("${c.name} has no phone number."); return }
+        val intl = ContactResolver.toInternational(phone, Prefs.countryCode(this))
+        try {
+            val uri = Uri.parse("https://wa.me/$intl?text=" + Uri.encode(msg))
+            startActivity(Intent(Intent.ACTION_VIEW, uri).setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) { speak("Could not open WhatsApp."); return }
+        log("WhatsApp → ${c.name} ($intl)")
+        speak("Opening WhatsApp.", false)
+        retry(12, 700,
+            { nodeByViewId("$pkg:id/send")?.let { clickNode(it) } ?: false },
+            { speak("Sent to ${c.name}.") },
+            { speak("The message is ready in WhatsApp. Say send when you see it.") })
+    }
+
+    private fun sendSms(c: ContactResolver.Contact, msg: String) {
+        val phone = c.phones.firstOrNull()
+        if (phone == null) { speak("${c.name} has no phone number."); return }
+        try {
+            val i = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + Uri.encode(phone)))
+                .putExtra("sms_body", msg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(i)
+        } catch (e: Exception) { speak("No SMS app found."); return }
+        speak("Opening messages.", false)
+        retry(8, 700, { clickSendButton() }, { speak("SMS sent to ${c.name}.") }, { speak("SMS is ready. Say send.") })
+    }
+
+    private fun sendWeChat(c: ContactResolver.Contact, msg: String) {
+        if (!isInstalled(PKG_WECHAT)) { speak("WeChat is not installed."); return }
+        val name = c.name
+        launch(PKG_WECHAT)
+        speak("Opening WeChat.", false)
+        handler.postDelayed({
+            val search = nodeByDesc("Search", "搜索") ?: nodeByText("Search", "搜索")
+            if (search == null || !clickNode(search)) { speak("I can't find WeChat search. Open the chat yourself and say reply."); return@postDelayed }
+            handler.postDelayed({
+                val box = firstEditable()
+                if (box == null || !setTextOn(box, name)) { speak("Couldn't type the contact name in WeChat."); return@postDelayed }
+                handler.postDelayed({
+                    val hit = findNode(root()) { n ->
+                        n.isVisibleToUser && !n.isEditable && (n.text?.toString()?.contains(name, true) == true)
+                    }
+                    if (hit == null || !clickNode(hit)) { speak("I couldn't find $name in WeChat."); return@postDelayed }
+                    handler.postDelayed({
+                        val input = firstEditable()
+                        if (input == null || !setTextOn(input, msg)) { speak("Couldn't type the message in WeChat."); return@postDelayed }
+                        retry(6, 500,
+                            { (nodeByText("Send", "发送") ?: nodeByDesc("Send", "发送"))?.let { clickNode(it) } ?: false },
+                            { speak("Sent to $name on WeChat.") },
+                            { speak("Message typed in WeChat. Say send.") })
+                    }, 1500)
+                }, 1800)
+            }, 900)
+        }, 2200)
+    }
+
+    private fun replyInCurrentChat(msg: String) {
+        if (!typeIntoFocused(msg)) { speak("No chat box found. Open a chat first."); return }
+        val go = {
+            retry(4, 400, { clickSendButton() }, { speak("Sent.") }, { speak("Typed, but I couldn't find send. Say send.") })
+        }
+        if (Prefs.confirm(this)) {
+            pending = Pending.Confirm { go() }
+            speak("Reply: $msg. Say yes to send.")
+        } else go()
+    }
+
+    // ───────────────────────── email ─────────────────────────
+
+    private fun startEmail(cmd: Command.Email) {
+        val q = cmd.contactQuery
+        if (q.isNullOrBlank()) { composeEmail(null, cmd.topic, cmd.body); return }
+        val res = contacts.resolveWithRemainder(q)
+        if (res.candidates.isEmpty()) { speak("I couldn't find $q in your contacts."); return }
+        val body = cmd.body ?: res.remainder.takeIf { it.isNotBlank() }?.let { CommandParser.cleanMessage(it) }
+        if (res.ambiguous) askChoose(res.candidates) { composeEmail(it, cmd.topic, body) }
+        else composeEmail(res.candidates.first(), cmd.topic, body)
+    }
+
+    private fun composeEmail(c: ContactResolver.Contact?, topic: String?, body: String?) {
+        if (topic == null && body == null) {
+            pending = Pending.AwaitText { t -> composeEmail(c, null, t) }
+            speak(if (c == null) "What should the email say?" else "What should the email to ${c.firstName()} say?")
+            return
+        }
+        val name = c?.name ?: ""
+        val to = c?.emails?.firstOrNull()
+        val warn = if (c != null && to == null) "${c.name} has no email address saved, so you'll need to add one. " else ""
+        val sender = Prefs.userName(this)
+        val key = Prefs.apiKey(this)
+        if (key.isNotBlank()) {
+            speak("Drafting the email.", false)
+            AiDrafter.draftEmail(key, Prefs.model(this), name, topic, body, sender) { result ->
+                handler.post {
+                    if (result != null) openComposer(to, result.first, result.second, warn)
+                    else {
+                        val d = AiDrafter.templateEmail(name, topic, body, sender)
+                        openComposer(to, d.first, d.second, warn + "AI drafting failed, using a simple draft. ")
+                    }
+                }
+            }
+        } else {
+            val d = AiDrafter.templateEmail(name, topic, body, sender)
+            openComposer(to, d.first, d.second, warn)
+        }
+    }
+
+    private fun openComposer(to: String?, subject: String, text: String, note: String) {
+        val uri = Uri.parse("mailto:" + (to ?: "") + "?subject=" + Uri.encode(subject) + "&body=" + Uri.encode(text))
+        val i = Intent(Intent.ACTION_SENDTO, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (isInstalled(PKG_GMAIL)) i.setPackage(PKG_GMAIL)
+        try { startActivity(i) } catch (e: Exception) { speak("No email app found."); return }
+        if (Prefs.autoSendEmail(this) && to != null) {
+            speak("${note}Sending the email.", false)
+            retry(10, 700, { clickSendButton() }, { speak("Email sent. Subject: $subject.") }, { speak("Email is ready. Say send to send it.") })
+        } else {
+            speak("${note}Email ready. Subject: $subject. Check it and say send.")
+        }
+    }
+
+    // ───────────────────────── screen helpers ─────────────────────────
+
+    private fun root(): AccessibilityNodeInfo? = rootInActiveWindow
+
+    private fun findNode(node: AccessibilityNodeInfo?, pred: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (pred(node)) return node
+        for (i in 0 until node.childCount) {
+            val f = findNode(node.getChild(i), pred)
+            if (f != null) return f
+        }
+        return null
+    }
+
+    private fun collectNodes(node: AccessibilityNodeInfo?, out: MutableList<AccessibilityNodeInfo>, pred: (AccessibilityNodeInfo) -> Boolean) {
+        if (node == null) return
+        if (pred(node)) out.add(node)
+        for (i in 0 until node.childCount) collectNodes(node.getChild(i), out, pred)
+    }
+
+    private fun nodeByViewId(id: String): AccessibilityNodeInfo? =
+        try { root()?.findAccessibilityNodeInfosByViewId(id)?.firstOrNull() } catch (e: Exception) { null }
+
+    private fun nodeByDesc(vararg descs: String): AccessibilityNodeInfo? = findNode(root()) { n ->
+        val d = n.contentDescription?.toString()?.trim()
+        d != null && n.isVisibleToUser && descs.any { it.equals(d, true) }
+    }
+
+    private fun nodeByText(vararg texts: String): AccessibilityNodeInfo? = findNode(root()) { n ->
+        val t = n.text?.toString()?.trim()
+        t != null && n.isVisibleToUser && texts.any { it.equals(t, true) }
+    }
+
+    private fun firstEditable(): AccessibilityNodeInfo? = findNode(root()) { it.isEditable && it.isVisibleToUser }
+
+    private fun clickNode(node: AccessibilityNodeInfo?): Boolean {
+        var cur = node
+        while (cur != null) {
+            if (cur.isClickable && cur.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            cur = cur.parent
+        }
+        if (node != null) {
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            if (!r.isEmpty) return tap(r.centerX().toFloat(), r.centerY().toFloat())
+        }
+        return false
+    }
+
+    private fun tap(x: Float, y: Float): Boolean {
+        val path = Path().apply { moveTo(x, y) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 60)).build()
+        return dispatchGesture(gesture, null, null)
+    }
+
+    private fun setTextOn(node: AccessibilityNodeInfo, text: String): Boolean {
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val args = Bundle()
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun typeIntoFocused(text: String): Boolean {
+        val focused = root()?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val target = if (focused != null && focused.isEditable) focused else firstEditable()
+        return target != null && setTextOn(target, text)
+    }
+
+    private fun clickSendButton(): Boolean {
+        val ids = listOf(
+            "$PKG_WHATSAPP:id/send", "$PKG_WHATSAPP_BIZ:id/send", "$PKG_GMAIL:id/send",
+            "com.google.android.apps.messaging:id/send_message_button_icon",
+            "com.samsung.android.messaging:id/send_button"
+        )
+        for (id in ids) nodeByViewId(id)?.let { if (clickNode(it)) return true }
+        nodeByDesc("Send", "发送", "Send message")?.let { if (clickNode(it)) return true }
+        nodeByText("Send", "发送")?.let { if (clickNode(it)) return true }
+        return false
+    }
+
+    private fun clickText(target: String) {
+        val r = root()
+        if (r == null) { speak("Nothing on screen."); return }
+        val direct = try { r.findAccessibilityNodeInfosByText(target) } catch (e: Exception) { null }
+        direct?.forEach { if (clickNode(it)) { speak("Clicked $target."); return } }
+        val fuzzy = findNode(r) { n ->
+            n.isVisibleToUser && ((n.text?.toString()?.contains(target, true) == true) || (n.contentDescription?.toString()?.contains(target, true) == true))
+        }
+        if (fuzzy != null && clickNode(fuzzy)) { speak("Clicked $target."); return }
+        speak("I can't find $target on the screen.")
+    }
+
+    private fun readScreen() {
+        val out = ArrayList<AccessibilityNodeInfo>()
+        collectNodes(root(), out) { n ->
+            val t = n.text?.toString()?.trim()
+            !t.isNullOrEmpty() && t.length > 1 && n.isVisibleToUser && !n.isEditable
+        }
+        val texts = out.mapNotNull { it.text?.toString()?.trim() }.distinct()
+        if (texts.isEmpty()) { speak("Nothing to read."); return }
+        speak(texts.takeLast(12).joinToString(". ").take(700))
+    }
+
+    private fun scroll(down: Boolean) {
+        val scrollable = findNode(root()) { it.isScrollable && it.isVisibleToUser }
+        if (scrollable != null) {
+            val action = if (down) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            if (scrollable.performAction(action)) return
+        }
+        val dm = resources.displayMetrics
+        val midX = dm.widthPixels / 2f
+        val startY = if (down) dm.heightPixels * 0.75f else dm.heightPixels * 0.25f
+        val endY = if (down) dm.heightPixels * 0.25f else dm.heightPixels * 0.75f
+        val path = Path().apply { moveTo(midX, startY); lineTo(midX, endY) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 400)).build()
+        dispatchGesture(gesture, null, null)
+    }
+
+    private fun retry(attempts: Int, delayMs: Long, action: () -> Boolean, onSuccess: () -> Unit, onFail: () -> Unit) {
+        handler.postDelayed({
+            val ok = try { action() } catch (e: Exception) { false }
+            when {
+                ok -> onSuccess()
+                attempts <= 1 -> onFail()
+                else -> retry(attempts - 1, delayMs, action, onSuccess, onFail)
+            }
+        }, delayMs)
     }
 }
