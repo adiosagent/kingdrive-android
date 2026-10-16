@@ -5,11 +5,14 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -27,9 +30,28 @@ import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
 
+    // palette
+    private val bg = Color.parseColor("#0B1220")
+    private val card = Color.parseColor("#141D2F")
+    private val cardLine = Color.parseColor("#1F2A40")
+    private val textPrimary = Color.parseColor("#F1F5F9")
+    private val textMuted = Color.parseColor("#8B97AD")
+    private val accent = Color.parseColor("#0EA5E9")
+    private val green = Color.parseColor("#22C55E")
+    private val amber = Color.parseColor("#F59E0B")
+    private val red = Color.parseColor("#EF4444")
+
+    private lateinit var orb: TextView
+    private lateinit var stateText: TextView
+    private lateinit var heardText: TextView
+    private lateinit var actionText: TextView
     private lateinit var toggleButton: Button
-    private lateinit var statusIndicator: TextView
     private lateinit var logText: TextView
+    private lateinit var checkAccess: TextView
+    private lateinit var checkMic: TextView
+    private lateinit var checkContacts: TextView
+    private lateinit var checkPhone: TextView
+
     private lateinit var langSpinner: Spinner
     private lateinit var confirmSwitch: Switch
     private lateinit var autoEmailSwitch: Switch
@@ -51,153 +73,269 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val scrollView = ScrollView(this).apply { setBackgroundColor(Color.parseColor("#0F172A")) }
-        val layout = LinearLayout(this).apply {
+        val scroll = ScrollView(this).apply { setBackgroundColor(bg); isVerticalScrollBarEnabled = false }
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(24), dp(20), dp(40))
+            setPadding(dp(18), dp(18), dp(18), dp(36))
         }
 
-        layout.addView(TextView(this).apply {
-            text = "DRIVE VOICE ASSIST"
-            textSize = 26f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#38BDF8"))
-            gravity = Gravity.CENTER
-        })
-        statusIndicator = TextView(this).apply {
-            text = "Status: Standby"
-            textSize = 18f
-            setTextColor(Color.parseColor("#94A3B8"))
-            gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, dp(16))
-        }
-        layout.addView(statusIndicator)
+        // ── header ──
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = "🎙"
+                textSize = 22f
+                setPadding(0, 0, dp(10), 0)
+            })
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@MainActivity).apply {
+                    text = "Drive Voice Assist"
+                    textSize = 22f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(textPrimary)
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = "Hands-free WhatsApp · WeChat · calls · email"
+                    textSize = 12f
+                    setTextColor(textMuted)
+                })
+            })
+        }, lp(0, dp(14)))
 
-        layout.addView(Button(this).apply {
-            text = "STEP 1: ENABLE ACCESSIBILITY"
+        // ── status card ──
+        val status = cardView()
+        orb = TextView(this).apply {
+            text = "🎤"
+            textSize = 40f
+            gravity = Gravity.CENTER
+            background = circle(cardLine)
+        }
+        status.addView(orb, LinearLayout.LayoutParams(dp(112), dp(112)).apply { gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(12) })
+        stateText = TextView(this).apply {
+            text = "STANDBY"
             textSize = 15f
-            setBackgroundColor(Color.parseColor("#334155"))
-            setTextColor(Color.WHITE)
-            setOnClickListener { showPlayStoreDisclosureDialog() }
-        }, matchWrap(0, dp(8)))
-
-        toggleButton = Button(this).apply {
-            text = "STEP 2: START DRIVING MODE"
-            textSize = 20f
+            letterSpacing = 0.12f
             setTypeface(null, Typeface.BOLD)
-            setBackgroundColor(Color.parseColor("#16A34A"))
+            setTextColor(textMuted)
+            gravity = Gravity.CENTER
+        }
+        status.addView(stateText)
+        heardText = TextView(this).apply {
+            text = "Say a command after starting driving mode"
+            textSize = 18f
+            setTextColor(textPrimary)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, dp(2))
+        }
+        status.addView(heardText)
+        actionText = TextView(this).apply {
+            text = ""
+            textSize = 13f
+            setTextColor(accent)
+            gravity = Gravity.CENTER
+        }
+        status.addView(actionText)
+        root.addView(status, lp(0, dp(12)))
+
+        // ── main button ──
+        toggleButton = Button(this).apply {
+            text = "START DRIVING MODE"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
-            setPadding(dp(16), dp(22), dp(16), dp(22))
+            background = rounded(green, dp(14))
+            setPadding(dp(16), dp(20), dp(16), dp(20))
+            isAllCaps = false
             setOnClickListener { toggleDriveMode() }
         }
-        layout.addView(toggleButton, matchWrap(0, dp(16)))
+        root.addView(toggleButton, lp(0, dp(18)))
 
-        layout.addView(label("LIVE LOG"))
+        // ── setup checklist ──
+        val setup = cardView()
+        setup.addView(sectionTitle("SETUP"))
+        checkAccess = checkRow("Accessibility service") { showPlayStoreDisclosureDialog() }
+        checkMic = checkRow("Microphone permission") { requestPermissions() }
+        checkContacts = checkRow("Contacts permission") { requestPermissions() }
+        checkPhone = checkRow("Phone permission") { requestPermissions() }
+        setup.addView(checkAccess); setup.addView(checkMic); setup.addView(checkContacts); setup.addView(checkPhone)
+        setup.addView(TextView(this).apply {
+            text = "If the accessibility toggle is greyed out: Settings → Apps → Drive Voice Assist → ⋮ → Allow restricted settings."
+            textSize = 12f
+            setTextColor(textMuted)
+            setPadding(0, dp(8), 0, 0)
+        })
+        root.addView(setup, lp(0, dp(12)))
+
+        // ── live log ──
+        val logCard = cardView()
+        logCard.addView(sectionTitle("ACTIVITY"))
         logText = TextView(this).apply {
-            text = "Waiting…"
+            text = "No activity yet."
             textSize = 12f
             typeface = Typeface.MONOSPACE
-            setTextColor(Color.parseColor("#CBD5E1"))
-            setBackgroundColor(Color.parseColor("#1E293B"))
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            minHeight = dp(120)
+            setTextColor(Color.parseColor("#C7D2E3"))
+            setLineSpacing(0f, 1.15f)
         }
-        layout.addView(logText)
+        logCard.addView(logText)
+        root.addView(logCard, lp(0, dp(12)))
 
-        layout.addView(label("VOICE COMMANDS"))
-        layout.addView(TextView(this).apply {
-            text = "• \"WhatsApp Allan saying I'm on my way\"\n" +
-                    "• \"WhatsApp Allan\" → asks for the message\n" +
-                    "• \"Tell Allan I'll be 10 minutes late\"\n" +
-                    "• \"WeChat Allan saying …\"  /  \"Text Allan …\"\n" +
-                    "• \"Call Allan\"\n" +
-                    "• \"Email Allan about the meeting tomorrow\"\n" +
-                    "• \"Email Allan saying I will send the file tonight\"\n" +
-                    "• \"Reply on my way\"  (in an open chat)\n" +
-                    "• \"Open WeChat\" / \"Open YouTube\" / any app name\n" +
-                    "• \"Navigate to KLCC\"\n" +
-                    "• \"Read screen\" / \"Scroll down\" / \"Go back\" / \"Home\"\n" +
-                    "• \"Click [button text]\" / \"Send\"\n" +
-                    "• \"Yes\" / \"No\" / \"Cancel\"  /  \"Stop driving mode\""
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#1E293B"))
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-        })
+        // ── commands ──
+        val cmd = cardView()
+        cmd.addView(sectionTitle("WHAT YOU CAN SAY"))
+        val examples = listOf(
+            "WhatsApp Allan saying I'm on my way" to "sends it, asks you to confirm",
+            "WhatsApp Allan" to "asks what the message is",
+            "Tell Allan I'll be 10 minutes late" to "WhatsApp by default",
+            "WeChat Allan saying …  ·  Text Allan …" to "WeChat / SMS",
+            "Call Allan" to "fuzzy name match, asks if several",
+            "Email Allan about the meeting tomorrow" to "drafts subject + body, opens Gmail",
+            "Email Allan saying I will send the file tonight" to "your exact words",
+            "Reply on my way" to "types and sends in the open chat",
+            "Open WeChat / YouTube / Maps / any app" to "",
+            "Navigate to KLCC" to "Google Maps",
+            "Read screen · Scroll down · Go back · Home" to "",
+            "Click [button text] · Send" to "",
+            "Yes · No · Cancel · Stop driving mode" to ""
+        )
+        for ((say, does) in examples) {
+            cmd.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(6), 0, dp(6))
+                addView(TextView(this@MainActivity).apply { text = "“$say”"; textSize = 14f; setTextColor(textPrimary) })
+                if (does.isNotEmpty()) addView(TextView(this@MainActivity).apply { text = does; textSize = 12f; setTextColor(textMuted) })
+            })
+        }
+        root.addView(cmd, lp(0, dp(12)))
 
-        layout.addView(label("SETTINGS"))
+        // ── settings ──
+        val settings = cardView()
+        settings.addView(sectionTitle("SETTINGS"))
         val prefs = Prefs.get(this)
 
-        layout.addView(label("Speech language", 13f))
+        settings.addView(fieldLabel("Speech language"))
         langSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, languages.map { it.second })
-            setBackgroundColor(Color.parseColor("#E2E8F0"))
+            background = rounded(Color.parseColor("#E2E8F0"), dp(8))
             val idx = languages.indexOfFirst { it.first == prefs.getString("lang", "en-US") }
             setSelection(if (idx >= 0) idx else 0)
         }
-        layout.addView(langSpinner)
+        settings.addView(langSpinner, lp(0, dp(6)))
 
-        confirmSwitch = Switch(this).apply {
-            text = "Ask \"yes\" before sending messages"
-            isChecked = prefs.getBoolean("confirm", true)
-            setTextColor(Color.WHITE)
-            setPadding(0, dp(12), 0, dp(4))
-        }
-        layout.addView(confirmSwitch)
+        confirmSwitch = switchRow("Ask \"yes\" before sending messages", prefs.getBoolean("confirm", true))
+        settings.addView(confirmSwitch)
+        autoEmailSwitch = switchRow("Send emails automatically (no review)", prefs.getBoolean("auto_email", false))
+        settings.addView(autoEmailSwitch)
 
-        autoEmailSwitch = Switch(this).apply {
-            text = "Send emails automatically (no review)"
-            isChecked = prefs.getBoolean("auto_email", false)
-            setTextColor(Color.WHITE)
-            setPadding(0, dp(8), 0, dp(4))
-        }
-        layout.addView(autoEmailSwitch)
-
-        layout.addView(label("Country code for WhatsApp numbers (Malaysia = 60)", 13f))
+        settings.addView(fieldLabel("Country code for WhatsApp numbers (Malaysia = 60)"))
         ccInput = input("60", prefs.getString("cc", "60") ?: "60").apply { inputType = InputType.TYPE_CLASS_NUMBER }
-        layout.addView(ccInput)
+        settings.addView(ccInput)
 
-        layout.addView(label("Your name (used to sign emails)", 13f))
+        settings.addView(fieldLabel("Your name (signs your emails)"))
         nameInput = input("e.g. Allan", prefs.getString("user_name", "") ?: "")
-        layout.addView(nameInput)
+        settings.addView(nameInput)
 
-        layout.addView(label("Claude API key (optional – AI-written emails)", 13f))
+        settings.addView(fieldLabel("Claude API key (optional – AI-written emails)"))
         keyInput = input("sk-ant-…", prefs.getString("api_key", "") ?: "", password = true)
-        layout.addView(keyInput)
+        settings.addView(keyInput)
 
-        layout.addView(label("AI model", 13f))
+        settings.addView(fieldLabel("AI model"))
         modelInput = input("claude-haiku-4-5", prefs.getString("model", "claude-haiku-4-5") ?: "claude-haiku-4-5")
-        layout.addView(modelInput)
+        settings.addView(modelInput)
 
-        layout.addView(Button(this).apply {
-            text = "SAVE SETTINGS"
-            setBackgroundColor(Color.parseColor("#0EA5E9"))
+        settings.addView(Button(this).apply {
+            text = "Save settings"
+            isAllCaps = false
             setTextColor(Color.WHITE)
-            setOnClickListener { savePrefs(); Toast.makeText(this@MainActivity, "Saved", Toast.LENGTH_SHORT).show() }
-        }, matchWrap(dp(12), 0))
+            background = rounded(accent, dp(10))
+            setOnClickListener { savePrefs(); Toast.makeText(this@MainActivity, "Settings saved", Toast.LENGTH_SHORT).show() }
+        }, lp(dp(14), 0))
+        root.addView(settings, lp(0, dp(12)))
 
-        scrollView.addView(layout)
-        setContentView(scrollView)
+        root.addView(TextView(this).apply {
+            text = "Drive Voice Assist v1.2 · Keep your eyes on the road."
+            textSize = 11f
+            setTextColor(textMuted)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, 0)
+        })
+
+        scroll.addView(root)
+        setContentView(scroll)
         requestPermissions()
     }
 
     override fun onResume() {
         super.onResume()
-        updateUI()
-        refreshLog()
-        DriveAccessibilityService.logListener = { refreshLog() }
+        DriveAccessibilityService.logListener = { refreshAll() }
+        DriveAccessibilityService.stateListener = { refreshAll() }
+        refreshAll()
     }
 
     override fun onPause() {
         super.onPause()
         DriveAccessibilityService.logListener = null
+        DriveAccessibilityService.stateListener = null
     }
 
-    private fun refreshLog() {
-        val lines = DriveAccessibilityService.logLines
-        logText.text = if (lines.isEmpty()) "Waiting…" else lines.takeLast(10).joinToString("\n")
-        updateUI()
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        refreshAll()
     }
+
+    // ───────────────────────── UI state ─────────────────────────
+
+    private fun refreshAll() {
+        val svc = DriveAccessibilityService.instance
+        val active = DriveAccessibilityService.isDriveModeActive
+        val st = DriveAccessibilityService.state
+
+        val (label, color, icon) = when {
+            svc == null -> Triple("ACCESSIBILITY OFF", red, "⚠")
+            !active -> Triple("STANDBY", textMuted, "🎤")
+            st == DriveAccessibilityService.State.LISTENING -> Triple("LISTENING", green, "🎤")
+            st == DriveAccessibilityService.State.PROCESSING -> Triple("THINKING", amber, "💭")
+            st == DriveAccessibilityService.State.SPEAKING -> Triple("SPEAKING", accent, "🔊")
+            st == DriveAccessibilityService.State.ERROR -> Triple("ERROR", red, "⚠")
+            else -> Triple("GETTING READY", amber, "⏳")
+        }
+        stateText.text = label
+        stateText.setTextColor(color)
+        orb.text = icon
+        orb.background = circle(if (color == textMuted) cardLine else blend(color, bg, 0.35f))
+
+        val heard = DriveAccessibilityService.lastHeard
+        heardText.text = if (heard.isBlank()) {
+            if (active) "Listening… say a command" else "Say a command after starting driving mode"
+        } else "“$heard”"
+        actionText.text = DriveAccessibilityService.lastAction
+
+        if (active) {
+            toggleButton.text = "STOP DRIVING MODE"
+            toggleButton.background = rounded(red, dp(14))
+        } else {
+            toggleButton.text = "START DRIVING MODE"
+            toggleButton.background = rounded(green, dp(14))
+        }
+
+        setCheck(checkAccess, "Accessibility service", svc != null)
+        setCheck(checkMic, "Microphone permission", granted(Manifest.permission.RECORD_AUDIO))
+        setCheck(checkContacts, "Contacts permission", granted(Manifest.permission.READ_CONTACTS))
+        setCheck(checkPhone, "Phone permission", granted(Manifest.permission.CALL_PHONE))
+
+        val lines = DriveAccessibilityService.logLines
+        logText.text = if (lines.isEmpty()) "No activity yet." else lines.takeLast(9).joinToString("\n")
+    }
+
+    private fun granted(p: String) = ActivityCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+
+    private fun setCheck(v: TextView, name: String, ok: Boolean) {
+        v.text = (if (ok) "✅  " else "❌  ") + name + (if (ok) "" else "   — tap to fix")
+        v.setTextColor(if (ok) textPrimary else amber)
+    }
+
+    // ───────────────────────── actions ─────────────────────────
 
     private fun savePrefs() {
         Prefs.get(this).edit()
@@ -225,6 +363,9 @@ class MainActivity : AppCompatActivity() {
                         "If the toggle is greyed out: Settings → Apps → Drive Voice Assist → ⋮ → Allow restricted settings."
             )
             .setPositiveButton("Agree & Enable") { _, _ -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+            .setNeutralButton("App info") { _, _ ->
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            }
             .setNegativeButton("Decline", null)
             .show()
     }
@@ -233,38 +374,16 @@ class MainActivity : AppCompatActivity() {
         val service = DriveAccessibilityService.instance
         if (service == null) { showPlayStoreDisclosureDialog(); return }
         if (!DriveAccessibilityService.isDriveModeActive) {
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(); return
-            }
+            if (!granted(Manifest.permission.RECORD_AUDIO)) { requestPermissions(); return }
             savePrefs()
             try { ContextCompat.startForegroundService(this, Intent(this, ListeningService::class.java)) } catch (e: Exception) { }
             service.setDriveMode(true)
-            service.speak("Driving mode active. I'm listening.")
+            if (DriveAccessibilityService.isDriveModeActive) service.speak("Driving mode active. I'm listening.")
         } else {
             service.setDriveMode(false)
             service.speak("Driving mode stopped.", false)
         }
-        updateUI()
-    }
-
-    private fun updateUI() {
-        if (DriveAccessibilityService.instance == null) {
-            statusIndicator.text = "Status: Accessibility not enabled"
-            statusIndicator.setTextColor(Color.parseColor("#F87171"))
-        } else if (DriveAccessibilityService.isDriveModeActive) {
-            statusIndicator.text = "Status: LISTENING"
-            statusIndicator.setTextColor(Color.parseColor("#4ADE80"))
-        } else {
-            statusIndicator.text = "Status: Standby (accessibility on)"
-            statusIndicator.setTextColor(Color.parseColor("#94A3B8"))
-        }
-        if (DriveAccessibilityService.isDriveModeActive) {
-            toggleButton.text = "STOP DRIVING MODE"
-            toggleButton.setBackgroundColor(Color.parseColor("#DC2626"))
-        } else {
-            toggleButton.text = "STEP 2: START DRIVING MODE"
-            toggleButton.setBackgroundColor(Color.parseColor("#16A34A"))
-        }
+        refreshAll()
     }
 
     private fun requestPermissions() {
@@ -273,32 +392,81 @@ class MainActivity : AppCompatActivity() {
         perms.add(Manifest.permission.CALL_PHONE)
         perms.add(Manifest.permission.READ_CONTACTS)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) perms.add(Manifest.permission.POST_NOTIFICATIONS)
-        val missing = perms.filter { ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        val missing = perms.filter { !granted(it) }
         if (missing.isNotEmpty()) ActivityCompat.requestPermissions(this, missing.toTypedArray(), 101)
     }
 
-    // ───────── small view helpers ─────────
+    // ───────────────────────── view helpers ─────────────────────────
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    private fun matchWrap(top: Int, bottom: Int) = LinearLayout.LayoutParams(
+    private fun lp(top: Int, bottom: Int) = LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
     ).apply { setMargins(0, top, 0, bottom) }
 
-    private fun label(text: String, size: Float = 12f) = TextView(this).apply {
+    private fun rounded(color: Int, radius: Int) = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = radius.toFloat()
+        setColor(color)
+    }
+
+    private fun circle(color: Int) = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(color)
+    }
+
+    private fun blend(c1: Int, c2: Int, ratio: Float): Int {
+        val r = Color.red(c1) * ratio + Color.red(c2) * (1 - ratio)
+        val g = Color.green(c1) * ratio + Color.green(c2) * (1 - ratio)
+        val b = Color.blue(c1) * ratio + Color.blue(c2) * (1 - ratio)
+        return Color.rgb(r.toInt(), g.toInt(), b.toInt())
+    }
+
+    private fun cardView() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = rounded(card, dp(16))
+        setPadding(dp(16), dp(16), dp(16), dp(16))
+    }
+
+    private fun sectionTitle(text: String) = TextView(this).apply {
         this.text = text
-        textSize = size
+        textSize = 11f
+        letterSpacing = 0.14f
         setTypeface(null, Typeface.BOLD)
-        setTextColor(Color.parseColor("#94A3B8"))
-        setPadding(0, dp(14), 0, dp(4))
+        setTextColor(textMuted)
+        setPadding(0, 0, 0, dp(8))
+    }
+
+    private fun fieldLabel(text: String) = TextView(this).apply {
+        this.text = text
+        textSize = 12f
+        setTextColor(textMuted)
+        setPadding(0, dp(12), 0, dp(4))
+    }
+
+    private fun checkRow(name: String, onClick: () -> Unit) = TextView(this).apply {
+        text = name
+        textSize = 14f
+        setTextColor(textPrimary)
+        setPadding(0, dp(6), 0, dp(6))
+        setOnClickListener { onClick() }
+    }
+
+    private fun switchRow(text: String, checked: Boolean) = Switch(this).apply {
+        this.text = text
+        isChecked = checked
+        textSize = 14f
+        setTextColor(textPrimary)
+        setPadding(0, dp(10), 0, dp(4))
     }
 
     private fun input(hint: String, value: String, password: Boolean = false) = EditText(this).apply {
         this.hint = hint
         setText(value)
-        setTextColor(Color.WHITE)
-        setHintTextColor(Color.parseColor("#64748B"))
-        setBackgroundColor(Color.parseColor("#1E293B"))
+        textSize = 14f
+        setTextColor(textPrimary)
+        setHintTextColor(textMuted)
+        background = rounded(cardLine, dp(8))
         setPadding(dp(12), dp(10), dp(12), dp(10))
         isSingleLine = true
         if (password) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD

@@ -9,6 +9,7 @@ import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
+import android.os.Build
 import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -27,6 +28,11 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         @Volatile var isDriveModeActive = false
         val logLines = ArrayList<String>()
         var logListener: ((String) -> Unit)? = null
+        var stateListener: ((State) -> Unit)? = null
+        @Volatile var state: State = State.STANDBY
+        @Volatile var lastHeard: String = ""
+        @Volatile var lastAction: String = ""
+        @Volatile var engineName: String = "system"
         private const val TTS_ID = "kd_tts"
 
         const val PKG_WHATSAPP = "com.whatsapp"
@@ -35,6 +41,8 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         const val PKG_GMAIL = "com.google.android.gm"
         const val PKG_MAPS = "com.google.android.apps.maps"
     }
+
+    enum class State { STANDBY, STARTING, LISTENING, PROCESSING, SPEAKING, ERROR }
 
     private val handler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
@@ -45,6 +53,9 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     private var isSpeaking = false
     private var listenAfterSpeech = true
     private var errorStreak = 0
+    private var hardErrors = 0
+    private var engineMode = 0          // 0 = system default, 1 = on-device, 2 = Google app
+    private var engineSwitches = 0
     private lateinit var contacts: ContactResolver
 
     private sealed class Pending {
@@ -113,17 +124,36 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         if (on) {
             applyPrefs()
             errorStreak = 0
+            hardErrors = 0
+            engineSwitches = 0
             Thread { contacts.all() }.start()
-            log("Driving mode ON")
+            log("Driving mode ON (engine: $engineName)")
+            setState(State.STARTING)
+            if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                speak("Speech recognition is not available on this phone. Please install or enable the Google app.", false)
+                setState(State.ERROR)
+                return
+            }
             startListening()
         } else {
             log("Driving mode OFF")
+            setState(State.STANDBY)
             handler.post { recognizer?.cancel(); isListening = false }
             try { stopService(Intent(this, ListeningService::class.java)) } catch (e: Exception) { }
         }
     }
 
     // ───────────────────────── logging / speech ─────────────────────────
+
+    private fun setState(st: State) {
+        state = st
+        handler.post { stateListener?.invoke(st) }
+    }
+
+    private fun action(msg: String) {
+        lastAction = msg
+        log("✔ $msg")
+    }
 
     fun log(msg: String) {
         handler.post {
@@ -143,6 +173,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
             isListening = false
             isSpeaking = true
             listenAfterSpeech = listenAfter
+            if (isDriveModeActive) setState(State.SPEAKING)
             t.speak(text, TextToSpeech.QUEUE_FLUSH, null, TTS_ID)
         }
     }
@@ -150,39 +181,93 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     private fun finishedSpeaking() {
         handler.post {
             isSpeaking = false
+            if (isDriveModeActive) setState(State.STARTING) else setState(State.STANDBY)
             if (listenAfterSpeech) scheduleListen(300)
         }
     }
 
     // ───────────────────────── speech recognition ─────────────────────────
 
+    private fun errorName(code: Int): String = when (code) {
+        SpeechRecognizer.ERROR_AUDIO -> "AUDIO"
+        SpeechRecognizer.ERROR_CLIENT -> "CLIENT"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "NO_PERMISSION"
+        SpeechRecognizer.ERROR_NETWORK -> "NETWORK"
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "NETWORK_TIMEOUT"
+        SpeechRecognizer.ERROR_NO_MATCH -> "NO_MATCH"
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "BUSY"
+        SpeechRecognizer.ERROR_SERVER -> "SERVER"
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "SPEECH_TIMEOUT"
+        10 -> "TOO_MANY_REQUESTS"
+        11 -> "SERVER_DISCONNECTED"
+        12 -> "LANGUAGE_NOT_SUPPORTED"
+        13 -> "LANGUAGE_UNAVAILABLE"
+        else -> "ERROR_$code"
+    }
+
+    /** Builds a recogniser for the current engineMode, falling back to the system default. */
+    private fun createRecognizer(): SpeechRecognizer? {
+        return try {
+            when (engineMode) {
+                1 -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+                    engineName = "on-device"
+                    SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+                } else {
+                    engineName = "system"
+                    SpeechRecognizer.createSpeechRecognizer(this)
+                }
+                2 -> {
+                    val google = ComponentName(
+                        "com.google.android.googlequicksearchbox",
+                        "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
+                    )
+                    engineName = "google"
+                    SpeechRecognizer.createSpeechRecognizer(this, google)
+                }
+                else -> {
+                    engineName = "system"
+                    SpeechRecognizer.createSpeechRecognizer(this)
+                }
+            }
+        } catch (e: Exception) {
+            log("⚠ cannot create recogniser (${e.message})")
+            engineName = "system"
+            try { SpeechRecognizer.createSpeechRecognizer(this) } catch (e2: Exception) { null }
+        }
+    }
+
+    private fun switchEngine() {
+        engineMode = (engineMode + 1) % 3
+        engineSwitches++
+        hardErrors = 0
+        log("↻ switching speech engine → mode $engineMode")
+        setupRecognizer()
+        if (engineSwitches == 1) speak("Switching speech engine.")
+        if (engineSwitches >= 4) {
+            isDriveModeActive = false
+            setState(State.ERROR)
+            speak("Speech recognition keeps failing on this phone. Please check that the Google app is installed and updated, and that the microphone permission is allowed.", false)
+        }
+    }
+
     private fun setupRecognizer() {
         handler.post {
-            recognizer?.destroy()
-            recognizer = try {
-                val google = ComponentName(
-                    "com.google.android.googlequicksearchbox",
-                    "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
-                )
-                if (packageManager.getLaunchIntentForPackage(google.packageName) != null)
-                    SpeechRecognizer.createSpeechRecognizer(this, google)
-                else SpeechRecognizer.createSpeechRecognizer(this)
-            } catch (e: Exception) {
-                SpeechRecognizer.createSpeechRecognizer(this)
-            }
+            try { recognizer?.destroy() } catch (e: Exception) { }
+            recognizer = createRecognizer()
             recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, Prefs.language(this@DriveAccessibilityService))
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Prefs.language(this@DriveAccessibilityService))
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
             }
             recognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) { isListening = true }
+                override fun onReadyForSpeech(params: Bundle?) { isListening = true; setState(State.LISTENING) }
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
+                override fun onEndOfSpeech() { setState(State.PROCESSING) }
                 override fun onPartialResults(partialResults: Bundle?) {}
                 override fun onEvent(eventType: Int, params: Bundle?) {}
 
@@ -192,27 +277,38 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
                     when (error) {
                         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
                             isDriveModeActive = false
+                            setState(State.ERROR)
+                            log("⚠ NO_PERMISSION")
                             speak("Microphone permission is missing. Please allow it in the app.", false)
                             return
                         }
                         SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                             errorStreak = 0
+                            hardErrors = 0
+                            setState(State.STARTING)
                             scheduleListen(250)
                             return
                         }
-                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> recognizer?.cancel()
+                    }
+                    log("⚠ ${errorName(error)} (engine: $engineName)")
+                    if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || error == SpeechRecognizer.ERROR_CLIENT) {
+                        try { recognizer?.cancel() } catch (e: Exception) { }
                     }
                     errorStreak++
-                    if (errorStreak > 12) { errorStreak = 0; setupRecognizer() }
-                    scheduleListen(minOf(500L + errorStreak * 500L, 4000L))
+                    hardErrors++
+                    if (hardErrors >= 3) { switchEngine(); if (!isDriveModeActive) return }
+                    setState(State.STARTING)
+                    scheduleListen(minOf(400L + errorStreak * 400L, 3000L))
                 }
 
                 override fun onResults(results: Bundle?) {
                     isListening = false
                     errorStreak = 0
+                    hardErrors = 0
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     val text = matches?.firstOrNull { it.isNotBlank() }
-                    if (text == null) { scheduleListen(250); return }
+                    if (text == null) { setState(State.STARTING); scheduleListen(250); return }
+                    setState(State.PROCESSING)
                     handleUtterance(text.trim())
                     if (!isSpeaking) scheduleListen(400)
                 }
@@ -227,9 +323,11 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
             val r = recognizer ?: return@post
             try {
                 isListening = true
+                setState(State.STARTING)
                 r.startListening(recognizerIntent)
             } catch (e: Exception) {
                 isListening = false
+                log("⚠ startListening failed: ${e.message}")
                 scheduleListen(1500)
             }
         }
@@ -246,6 +344,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     // ───────────────────────── command handling ─────────────────────────
 
     private fun handleUtterance(raw: String) {
+        lastHeard = raw
         log("🎤 $raw")
         val p = pending
         if (p != null && handlePending(p, raw)) return
@@ -296,7 +395,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
             is Command.Type -> if (typeIntoFocused(cmd.text)) speak("Typed. Say send to send it.") else speak("No text box found.")
             is Command.Click -> clickText(cmd.target)
             is Command.Email -> startEmail(cmd)
-            is Command.Unknown -> speak("Sorry, I didn't get that. Say help for commands.")
+            is Command.Unknown -> { action("Not understood"); speak("Sorry, I didn't get that. Say help for commands.") }
         }
     }
 
@@ -362,7 +461,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
     private fun openApp(name: String) {
         val app = resolveApp(name)
         if (app == null || !launch(app.first)) { speak("I couldn't find an app called $name."); return }
-        speak("Opening ${app.second}.")
+        action("Open ${app.second}"); speak("Opening ${app.second}.")
     }
 
     private fun navigate(dest: String) {
@@ -391,7 +490,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
 
     private fun dial(c: ContactResolver.Contact) {
         try {
-            speak("Calling ${c.name}.")
+            action("Call ${c.name}"); speak("Calling ${c.name}.")
             startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(c.phones.first()))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         } catch (e: Exception) {
             speak("I'm not allowed to make calls. Please grant the phone permission.")
@@ -455,7 +554,7 @@ class DriveAccessibilityService : AccessibilityService(), TextToSpeech.OnInitLis
         speak("Opening WhatsApp.", false)
         retry(12, 700,
             { nodeByViewId("$pkg:id/send")?.let { clickNode(it) } ?: false },
-            { speak("Sent to ${c.name}.") },
+            { action("WhatsApp sent to ${c.name}"); speak("Sent to ${c.name}.") },
             { speak("The message is ready in WhatsApp. Say send when you see it.") })
     }
 
